@@ -1,97 +1,95 @@
 from pathlib import Path
+import gc
 
 import torch
 import torch.nn as nn
 from torchvision import models, transforms
 from PIL import Image
 
-from pytorch_grad_cam import GradCAM
-from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
-from pytorch_grad_cam.utils.image import show_cam_on_image
-
-# --------------------------------------------------
-# 1. Paths
-# --------------------------------------------------
-
 BASE_DIR = Path(__file__).resolve().parent.parent
-
 MODEL_PATH = BASE_DIR / "models" / "mobilenetv2_test.pth"
+OUTPUT_DIR = BASE_DIR / "app" / "outputs"
+
+DEVICE = torch.device("cpu")
+
+# IMPORTANT:
+# Do NOT load the model when this file is imported.
+# Render only has 512 MB RAM, so we load it when actually needed.
+
+_model = None
+_classes = None
+_cam = None
+
+# Keep CPU memory/thread usage low on Render
+torch.set_num_threads(1)
 
 
-# --------------------------------------------------
-# 2. Device
-# --------------------------------------------------
+def _ensure_model():
+    """Load the ML model only when it is actually needed."""
+    global _model, _classes
 
-DEVICE = torch.device(
-    "cuda" if torch.cuda.is_available() else "cpu"
-)
+    if _model is not None:
+        return _model, _classes
 
-print("Using device:", DEVICE)
+    print("Loading MobileNetV2 model...")
 
+    checkpoint = torch.load(
+        MODEL_PATH,
+        map_location="cpu"
+    )
 
-# --------------------------------------------------
-# 3. Load checkpoint
-# --------------------------------------------------
+    _classes = checkpoint["classes"]
 
-checkpoint = torch.load(
-    MODEL_PATH,
-    map_location=DEVICE
-)
+    model = models.mobilenet_v2(weights=None)
+    model.classifier[1] = nn.Linear(
+        model.classifier[1].in_features,
+        len(_classes)
+    )
 
-classes = checkpoint["classes"]
+    model.load_state_dict(checkpoint["model_state_dict"])
 
-print("Model checkpoint loaded.")
-print("Number of classes:", len(classes))
+    # Free checkpoint memory after loading
+    del checkpoint
+    gc.collect()
 
+    model = model.to(DEVICE)
+    model.eval()
 
-# --------------------------------------------------
-# 4. Create model
-# --------------------------------------------------
+    _model = model
 
-model = models.mobilenet_v2(weights=None)
+    print("MobileNetV2 model loaded successfully.")
 
-model.classifier[1] = nn.Linear(
-    model.classifier[1].in_features,
-    len(classes)
-)
-
-
-# --------------------------------------------------
-# 5. Load trained weights
-# --------------------------------------------------
-
-model.load_state_dict(
-    checkpoint["model_state_dict"]
-)
-
-model = model.to(DEVICE)
-
-model.eval()
-
-print("Trained model loaded successfully.")
+    return _model, _classes
 
 
-
-# --------------------------------------------------
-# Grad-CAM setup
-# --------------------------------------------------
-
-target_layers = [
-    model.features[-1]
-]
-
-cam = GradCAM(
-    model=model,
-    target_layers=target_layers
-)
-
-print("Grad-CAM ready.")
+def get_classes():
+    """Return the supported disease classes."""
+    _, classes = _ensure_model()
+    return classes
 
 
-# --------------------------------------------------
-# 6. Image preprocessing
-# --------------------------------------------------
+def _ensure_cam():
+    """Create Grad-CAM only when it is actually needed."""
+    global _cam
 
+    if _cam is not None:
+        return _cam
+
+    model, _ = _ensure_model()
+
+    from pytorch_grad_cam import GradCAM
+
+    target_layers = [model.features[-1]]
+
+    _cam = GradCAM(
+        model=model,
+        target_layers=target_layers
+    )
+
+    return _cam
+
+
+# Image preprocessing
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
@@ -102,224 +100,198 @@ transform = transforms.Compose([
 ])
 
 
-# --------------------------------------------------
-# 7. Prediction + Grad-CAM
-# --------------------------------------------------
+def check_image_quality(image):
+    """
+    Basic image-quality check.
 
-from PIL import Image, ImageFilter, ImageStat
+    Returns:
+        (True, []) if acceptable
+        (False, [issues]) if image quality is poor
+    """
 
-def check_image_quality(image: Image.Image) -> tuple[bool, list[str]]:
     issues = []
+
     width, height = image.size
-    
-    # 1. Size check
-    if width < 50 or height < 50:
-        issues.append("Image is too small (minimum 50x50 pixels).")
 
-    # 2. Brightness check (mean pixel value)
-    stat = ImageStat.Stat(image.convert("L"))
-    mean_brightness = stat.mean[0]
-    if mean_brightness < 15:
-        issues.append("Image is extremely dark.")
-    elif mean_brightness > 240:
-        issues.append("Image is extremely bright or overexposed.")
+    if width < 100 or height < 100:
+        issues.append("Image resolution is too low.")
 
-    # 3. Blur check (Laplacian variance)
-    # Apply FIND_EDGES which acts similarly to a Laplacian filter
-    edges = image.convert("L").filter(ImageFilter.FIND_EDGES)
-    edge_stat = ImageStat.Stat(edges)
-    # edge_stat.var[0] gives variance of the edges
-    if edge_stat.var[0] < 50:  # conservative threshold
-        issues.append("Image appears too blurry.")
+    if image.mode not in ["RGB", "RGBA"]:
+        issues.append("Unsupported image format.")
 
-    acceptable = len(issues) == 0
-    return acceptable, issues
+    return len(issues) == 0, issues
+
 
 def predict_image_bytes(image_bytes):
-    import io
-    import base64
-    import uuid
-    import os
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    
-    acceptable, issues = check_image_quality(image)
-    if not acceptable:
-        return {"acceptable": False, "issues": issues}, None, None
+    """
+    Run disease prediction on uploaded image bytes.
+    """
 
-    image_tensor = transform(image)
-    input_tensor = image_tensor.unsqueeze(0).to(DEVICE)
+    # Open image first
+    try:
+        import io
 
-    # Prediction
-    with torch.no_grad():
+        image = Image.open(io.BytesIO(image_bytes))
+
+        # Convert to RGB
+        image = image.convert("RGB")
+
+    except Exception as exc:
+        return {
+            "prediction_status": "image_quality_failed",
+            "is_low_confidence": True,
+            "error": f"Could not read image: {str(exc)}"
+        }
+
+    # Check image quality BEFORE loading the model.
+    quality_ok, quality_issues = check_image_quality(image)
+
+    if not quality_ok:
+        return {
+            "prediction_status": "image_quality_failed",
+            "is_low_confidence": True,
+            "quality_issues": quality_issues,
+            "treatment": None
+        }
+
+    # Model is loaded only now.
+    model, classes = _ensure_model()
+
+    # Prepare image
+    input_tensor = transform(image).unsqueeze(0).to(DEVICE)
+
+    # Run prediction
+    with torch.inference_mode():
         outputs = model(input_tensor)
+        probabilities = torch.softmax(outputs, dim=1)
 
-    probabilities = torch.softmax(outputs, dim=1)
-    top_probabilities, top_indices = torch.topk(probabilities, 3, dim=1)
+    confidence, predicted_index = torch.max(probabilities, dim=1)
 
-    results = []
-    for probability, index in zip(top_probabilities[0], top_indices[0]):
-        results.append({
-            "disease": classes[index.item()],
-            "confidence": probability.item() * 100
-        })
+    confidence_value = float(confidence.item())
+    predicted_index = int(predicted_index.item())
 
-    # Grad-CAM for top prediction
-    predicted_index = top_indices[0][0].item()
-    targets = [ClassifierOutputTarget(predicted_index)]
-    
-    grayscale_cam = cam(input_tensor=input_tensor, targets=targets)
-    grayscale_cam = grayscale_cam[0]
+    predicted_class = classes[predicted_index]
 
-    # Prepare original image for visualization
-    original_image = image.resize((224, 224))
-    rgb_image = (
-        torch.tensor(list(original_image.getdata()), dtype=torch.float32)
-        .reshape(224, 224, 3)
-        .numpy() / 255.0
-    )
+    # Top 3 predictions
+    top_k = min(3, len(classes))
 
-    visualization = show_cam_on_image(rgb_image, grayscale_cam, use_rgb=True)
-    
-    filename = f"{uuid.uuid4().hex}.jpg"
-    output_path = BASE_DIR.parent / "app" / "outputs" / filename
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    Image.fromarray(visualization).save(output_path, format="JPEG")
-    heatmap_url = f"/outputs/{filename}"
-
-    return {"acceptable": True, "issues": []}, results, heatmap_url
-
-def predict_image(image_path):
-
-    image = Image.open(image_path).convert("RGB")
-
-    image_tensor = transform(image)
-
-    input_tensor = image_tensor.unsqueeze(0).to(DEVICE)
-
-    # Prediction
-    with torch.no_grad():
-        outputs = model(input_tensor)
-
-    probabilities = torch.softmax(
-        outputs,
-        dim=1
-    )
-
-    top_probabilities, top_indices = torch.topk(
+    top_probs, top_indices = torch.topk(
         probabilities,
-        3,
+        top_k,
         dim=1
     )
 
-    results = []
+    top_predictions = []
 
     for probability, index in zip(
-        top_probabilities[0],
+        top_probs[0],
         top_indices[0]
     ):
-        results.append({
-            "disease": classes[index.item()],
-            "confidence": probability.item() * 100
+        top_predictions.append({
+            "class": classes[int(index.item())],
+            "confidence": float(probability.item())
         })
 
-    # Grad-CAM for top prediction
-    predicted_index = top_indices[0][0].item()
+    # ---------------------------------------------------------
+    # Grad-CAM
+    # ---------------------------------------------------------
 
-    targets = [
-        ClassifierOutputTarget(predicted_index)
-    ]
+    gradcam_path = None
 
-    grayscale_cam = cam(
-        input_tensor=input_tensor,
-        targets=targets
-    )
+    try:
+        cam = _ensure_cam()
 
-    grayscale_cam = grayscale_cam[0]
+        from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
+        from pytorch_grad_cam.utils.image import show_cam_on_image
 
-    # Prepare original image for visualization
-    original_image = Image.open(
-        image_path
-    ).convert("RGB")
+        targets = [
+            ClassifierOutputTarget(predicted_index)
+        ]
 
-    original_image = original_image.resize(
-        (224, 224)
-    )
+        # Grad-CAM expects a batch of RGB images in [0,1]
+        rgb_image = image.resize((224, 224))
 
-    rgb_image = (
-        torch.tensor(
-            list(original_image.getdata()),
-            dtype=torch.float32
-        )
-        .reshape(224, 224, 3)
-        .numpy()
-        / 255.0
-    )
+        rgb_array = (
+            torch.from_numpy(
+                __import__("numpy").array(rgb_image)
+            ).float() / 255.0
+        ).numpy()
 
-    visualization = show_cam_on_image(
-        rgb_image,
-        grayscale_cam,
-        use_rgb=True
-    )
-
-    output_path = (
-        BASE_DIR
-        / "outputs"
-        / "gradcam_result.jpg"
-    )
-
-    output_path.parent.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    Image.fromarray(
-        visualization
-    ).save(output_path)
-
-    return results, output_path
-# --------------------------------------------------
-# 8. Test prediction
-# --------------------------------------------------
-
-if __name__ == "__main__":
-
-    TEST_FOLDER = (
-        BASE_DIR
-        / "data"
-        / "color"
-        / "Apple___healthy"
-    )
-
-    images = list(TEST_FOLDER.glob("*"))
-
-    if images:
-
-        IMAGE_PATH = images[0]
-
-        results, heatmap_path = predict_image(
-            IMAGE_PATH
+        grayscale_cam = cam(
+            input_tensor=input_tensor,
+            targets=targets
         )
 
-        print("\n================================")
-        print("TOP 3 PREDICTIONS")
-        print("================================")
+        grayscale_cam = grayscale_cam[0]
 
-        print("Image:", IMAGE_PATH.name)
-        print("Actual class: Apple___healthy")
+        visualization = show_cam_on_image(
+            rgb_array,
+            grayscale_cam,
+            use_rgb=True
+        )
 
-        for i, result in enumerate(
-            results,
-            start=1
-        ):
-            print(
-                f"{i}. {result['disease']} "
-                f"-> {result['confidence']:.2f}%"
+        OUTPUT_DIR.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        gradcam_path = OUTPUT_DIR / "gradcam_latest.jpg"
+
+        Image.fromarray(visualization).save(
+            gradcam_path
+        )
+
+    except Exception as exc:
+        print(f"Grad-CAM generation failed: {exc}")
+
+    # ---------------------------------------------------------
+    # Confidence handling
+    # ---------------------------------------------------------
+
+    confidence_threshold = 0.70
+
+    try:
+        import os
+
+        confidence_threshold = float(
+            os.getenv(
+                "CONFIDENCE_THRESHOLD",
+                "0.70"
             )
+        )
+    except Exception:
+        confidence_threshold = 0.70
 
-        print("\nGrad-CAM saved to:")
-        print(heatmap_path)
+    is_low_confidence = (
+        confidence_value < confidence_threshold
+    )
 
+    if is_low_confidence:
+        prediction_status = "low_confidence"
     else:
+        prediction_status = "success"
 
-        print("No images found.")
+    return {
+        "prediction_status": prediction_status,
+        "is_low_confidence": is_low_confidence,
+        "predicted_class": predicted_class,
+        "confidence": confidence_value,
+        "top_predictions": top_predictions,
+        "gradcam_path": str(gradcam_path)
+        if gradcam_path
+        else None,
+        "quality_issues": []
+    }
+
+
+def predict_image(image_path):
+    """
+    Convenience function for predicting from an image file.
+    """
+
+    image_path = Path(image_path)
+
+    with open(image_path, "rb") as f:
+        image_bytes = f.read()
+
+    return predict_image_bytes(image_bytes)

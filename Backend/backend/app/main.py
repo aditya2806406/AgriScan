@@ -27,11 +27,14 @@ app.add_middleware(
 
 @app.get("/health")
 def health_check():
-    from .core.model_loader import is_mock_mode, load_model
+    import os
 
-    load_model()  # ensures the mock/real decision has been made at least once
-    return {"status": "ok", "mock_mode": is_mock_mode()}
+    mock_mode = os.getenv("ALLOW_MOCK", "false").lower() == "true"
 
+    return {
+        "status": "ok",
+        "mock_mode": mock_mode
+    }
 
 from fastapi.staticfiles import StaticFiles
 import os
