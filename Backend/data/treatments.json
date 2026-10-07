@@ -1,0 +1,77 @@
+{
+  "Tomato___Early_blight": {
+    "disease": "Tomato — Early Blight",
+    "symptoms": ["Dark, concentric spots on lower leaves", "Yellowing around spots", "Defoliation starting from the bottom"],
+    "organic_management": ["Copper-based fungicide spray every 7-10 days", "Remove and destroy infected lower leaves"],
+    "chemical_management": ["Use a locally approved fungicide according to the product label and local agricultural guidance."],
+    "prevention": [
+      "Rotate crops — avoid tomato/potato in the same bed consecutively",
+      "Increase plant spacing for airflow",
+      "Water at the base, not on foliage"
+    ],
+    "caution": "Do not compost infected plant material.",
+    "sources": ["Local Agricultural Extension"]
+  },
+  "Tomato___Late_blight": {
+    "disease": "Tomato — Late Blight",
+    "symptoms": ["Large, dark, water-soaked spots on leaves", "White mold on the underside of leaves", "Brown, greasy spots on stems"],
+    "organic_management": ["Copper hydroxide spray applied preventatively before wet weather", "Destroy infected plants immediately — this disease spreads fast"],
+    "chemical_management": ["Use a locally approved systemic fungicide according to the product label."],
+    "prevention": [
+      "Avoid overhead irrigation",
+      "Ensure good drainage and airflow between plants",
+      "Remove volunteer potato/tomato plants that can carry the pathogen between seasons"
+    ],
+    "caution": "Late blight can destroy entire crops quickly. Act immediately.",
+    "sources": ["Local Agricultural Extension"]
+  },
+  "Tomato___healthy": {
+    "disease": "Tomato — Healthy",
+    "symptoms": ["Normal green leaves", "No spots or lesions"],
+    "organic_management": ["No treatment needed."],
+    "chemical_management": ["No treatment needed."],
+    "prevention": [
+      "Continue routine monitoring for early symptoms",
+      "Maintain consistent watering and balanced fertilization"
+    ],
+    "caution": "",
+    "sources": []
+  },
+  "Potato___Late_blight": {
+    "disease": "Potato — Late Blight",
+    "symptoms": ["Large, dark spots on leaves", "White fuzzy growth on undersides", "Rotting tubers"],
+    "organic_management": ["Copper-based fungicide, applied before disease pressure builds, especially in cool wet conditions."],
+    "chemical_management": ["Use a locally approved fungicide according to the product label and local agricultural guidance."],
+    "prevention": [
+      "Use certified disease-free seed potatoes",
+      "Hill soil around plants to protect tubers",
+      "Destroy infected plant debris after harvest"
+    ],
+    "caution": "Late blight is highly contagious among solanaceous crops.",
+    "sources": ["Local Agricultural Extension"]
+  },
+  "Corn_(maize)___Common_rust": {
+    "disease": "Corn — Common Rust",
+    "symptoms": ["Small, reddish-brown pustules on both leaf surfaces", "Yellowing around pustules"],
+    "organic_management": ["Generally tolerable at low levels; remove severely affected leaves in home garden settings."],
+    "chemical_management": ["Use a locally approved fungicide if infection is severe and early in the season, per local guidance."],
+    "prevention": [
+      "Plant rust-resistant corn varieties where available",
+      "Avoid dense planting that limits airflow"
+    ],
+    "caution": "Avoid planting susceptible varieties in consecutive seasons.",
+    "sources": ["Local Agricultural Extension"]
+  },
+  "_default": {
+    "disease": "Unknown",
+    "symptoms": [],
+    "organic_management": ["Consult a local agricultural extension office for organic treatment options for this specific disease."],
+    "chemical_management": ["Use a locally approved treatment according to the product label and local agricultural guidance."],
+    "prevention": [
+      "Isolate affected plants where possible",
+      "Monitor surrounding plants for spread"
+    ],
+    "caution": "Consult a professional before applying unknown treatments.",
+    "sources": []
+  }
+}

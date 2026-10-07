@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body {
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+.container-shell {
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: 0 28px;
+}

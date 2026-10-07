@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Virtual environment
+Backend/backend/venv/
+
+# Environment files
+.env
+Backend/backend/.env
+frontend/.env
+
+# Database
+Backend/backend/*.db
+Backend/backend/*.sqlite
+Backend/backend/*.sqlite3
+
+# User uploads / generated runtime files
+Backend/backend/uploads/
+
+# ML dataset - DO NOT upload
+Backend/backend/ml/data/
+
+# Generated ML output images
+Backend/backend/ml/outputs/*.jpg
+Backend/backend/ml/outputs/*.png
+
+# Frontend dependencies/build
+frontend/node_modules/
+frontend/dist/
+
+# Frontend generated TypeScript cache
+frontend/tsconfig.tsbuildinfo
+
+# Temporary/test generated PDF
+Backend/backend/test_report.pdf
+
+# Old/dead files
+Backend/backend/main_old.py
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Stray/legacy backend virtual environment
+Backend/ml/venv/
+
+# Backend runtime uploads and generated outputs
+Backend/backend/app/uploads/
+Backend/backend/app/outputs/
+
+# Root test image
+test.jpg
