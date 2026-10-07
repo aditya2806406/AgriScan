@@ -148,7 +148,8 @@ def download_report(request: ReportRequest, db: Session = Depends(get_db)):
 
 @router.get("/supported-classes")
 def get_supported_classes():
-    # Return a curated list or just the model's classes
-    # Here we import the classes from the predict script
-    from predict import classes
-    return {"classes": classes}
+    from predict import get_classes
+
+    return {
+        "classes": get_classes()
+    }
