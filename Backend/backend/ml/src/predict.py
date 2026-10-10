@@ -1,3 +1,4 @@
+
 from pathlib import Path
 import gc
 import io
@@ -8,14 +9,12 @@ import torch.nn as nn
 from torchvision import models, transforms
 from PIL import Image, ImageFilter, ImageStat
 
-
 # --------------------------------------------------
 # 1. Paths
 # --------------------------------------------------
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODEL_PATH = BASE_DIR / "models" / "mobilenetv2_test.pth"
-
 
 # --------------------------------------------------
 # 2. Device
@@ -27,15 +26,12 @@ DEVICE = torch.device("cpu")
 # Keep CPU/thread memory usage low on Render.
 torch.set_num_threads(1)
 
-
 # --------------------------------------------------
 # 3. Lazy-loaded model variables
 # --------------------------------------------------
 
 _model = None
 _classes = None
-_cam = None
-
 
 # --------------------------------------------------
 # 4. Lazy model loader
@@ -44,11 +40,8 @@ _cam = None
 def _ensure_model():
     """
     Load MobileNetV2 only when a real prediction is requested.
-
-    This prevents Render from loading the 89 MB model
-    during application startup.
+    This prevents Render from loading the model during startup.
     """
-
     global _model, _classes
 
     if _model is not None:
@@ -65,7 +58,6 @@ def _ensure_model():
     _classes = checkpoint["classes"]
 
     model = models.mobilenet_v2(weights=None)
-
     model.classifier[1] = nn.Linear(
         model.classifier[1].in_features,
         len(_classes)
@@ -76,7 +68,6 @@ def _ensure_model():
         assign=True
     )
 
-    # Free checkpoint memory after loading.
     del checkpoint
     gc.collect()
 
@@ -96,24 +87,13 @@ def _ensure_model():
 # --------------------------------------------------
 
 def get_classes():
-    """
-    Return the model's 38 supported classes.
-    """
-
+    """Return the model's supported classes."""
     _, classes = _ensure_model()
-
     return classes
 
 
 # --------------------------------------------------
-# 6. Lazy Grad-CAM loader
-# --------------------------------------------------
-
-# Removed _ensure_cam to use context manager locally
-
-
-# --------------------------------------------------
-# 7. Image preprocessing
+# 6. Image preprocessing
 # --------------------------------------------------
 
 transform = transforms.Compose([
@@ -127,87 +107,64 @@ transform = transforms.Compose([
 
 
 # --------------------------------------------------
-# 8. Image quality checking
+# 7. Image quality checking
 # --------------------------------------------------
 
-def check_image_quality(
-    image: Image.Image
-) -> tuple[bool, list[str]]:
-
+def check_image_quality(image: Image.Image) -> tuple[bool, list[str]]:
     issues = []
-
     width, height = image.size
 
-    # Minimum size
     if width < 50 or height < 50:
-        issues.append(
-            "Image is too small (minimum 50x50 pixels)."
-        )
+        issues.append("Image is too small (minimum 50x50 pixels).")
 
-    # Brightness check
-    stat = ImageStat.Stat(
-        image.convert("L")
-    )
-
+    stat = ImageStat.Stat(image.convert("L"))
     mean_brightness = stat.mean[0]
 
     if mean_brightness < 15:
-        issues.append(
-            "Image is extremely dark."
-        )
-
+        issues.append("Image is extremely dark.")
     elif mean_brightness > 240:
-        issues.append(
-            "Image is extremely bright or overexposed."
-        )
+        issues.append("Image is extremely bright or overexposed.")
 
-    # Blur check
-    edges = image.convert("L").filter(
-        ImageFilter.FIND_EDGES
-    )
-
+    edges = image.convert("L").filter(ImageFilter.FIND_EDGES)
     edge_stat = ImageStat.Stat(edges)
 
     if edge_stat.var[0] < 50:
-        issues.append(
-            "Image appears too blurry."
-        )
+        issues.append("Image appears too blurry.")
 
-    acceptable = len(issues) == 0
-
-    return acceptable, issues
+    return len(issues) == 0, issues
 
 
 # --------------------------------------------------
-# 9. Prediction + Grad-CAM
+# 8. Prediction + Grad-CAM
 # --------------------------------------------------
 
 def predict_image_bytes(image_bytes):
-
     import PIL
-    # Max ~16 million pixels (e.g. 4000x4000) to prevent decompression bombs
+
+    # Limit decoded image size to help prevent excessive memory use.
     PIL.Image.MAX_IMAGE_PIXELS = 16_000_000
 
-    # Open image (reads header only initially)
     try:
         image = Image.open(io.BytesIO(image_bytes))
 
-        # Enforce reasonable decoding limits (e.g., max 2000x2000)
-        # to prevent memory bombs before fully decompressing to RGB
+        # Reduce the decoded image dimensions before converting to RGB.
         image.thumbnail((2000, 2000), Image.Resampling.LANCZOS)
-
         image = image.convert("RGB")
+
     except PIL.Image.DecompressionBombError:
         return (
             {
                 "acceptable": False,
-                "issues": ["Image exceeds maximum pixel limit. Please upload a smaller image."],
+                "issues": [
+                    "Image exceeds maximum pixel limit. Please upload a smaller image."
+                ],
                 "is_malformed": True
             },
             None,
             None
         )
-    except Exception as e:
+
+    except Exception:
         return (
             {
                 "acceptable": False,
@@ -218,12 +175,10 @@ def predict_image_bytes(image_bytes):
             None
         )
 
-    # IMPORTANT:
-    # Check image quality BEFORE loading model.
+    # Check image quality before loading the model.
     acceptable, issues = check_image_quality(image)
 
     if not acceptable:
-
         return (
             {
                 "acceptable": False,
@@ -233,41 +188,21 @@ def predict_image_bytes(image_bytes):
             None
         )
 
-    # --------------------------------------------------
-    # Load model only now
-    # --------------------------------------------------
-
+    # Load the model only after image validation.
     model, classes = _ensure_model()
 
-    # --------------------------------------------------
-    # Prepare image
-    # --------------------------------------------------
-
     image_tensor = transform(image)
+    input_tensor = image_tensor.unsqueeze(0).to(DEVICE)
 
-    input_tensor = image_tensor.unsqueeze(0).to(
-        DEVICE
-    )
-
-    # --------------------------------------------------
     # Prediction
-    # --------------------------------------------------
-
     with torch.inference_mode():
+        outputs = model(input_tensor)
+        probabilities = torch.softmax(outputs, dim=1)
 
-        outputs = model(
-            input_tensor
-        )
-
-        probabilities = torch.softmax(
-            outputs,
-            dim=1
-        )
-
-    # Top 3
+    # Top 3 predictions
     top_probabilities, top_indices = torch.topk(
         probabilities,
-        3,
+        min(3, probabilities.shape[1]),
         dim=1
     )
 
@@ -277,41 +212,23 @@ def predict_image_bytes(image_bytes):
         top_probabilities[0],
         top_indices[0]
     ):
-
         results.append({
             "disease": classes[index.item()],
             "confidence": probability.item() * 100
         })
 
-    # --------------------------------------------------
     # Grad-CAM
-    # --------------------------------------------------
-
     heatmap_url = None
 
     try:
-
         from pytorch_grad_cam import GradCAM
-        from pytorch_grad_cam.utils.model_targets import (
-            ClassifierOutputTarget
-        )
-        from pytorch_grad_cam.utils.image import (
-            show_cam_on_image
-        )
+        from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
+        from pytorch_grad_cam.utils.image import show_cam_on_image
+        import numpy as np
 
-        predicted_index = (
-            top_indices[0][0].item()
-        )
-
-        targets = [
-            ClassifierOutputTarget(
-                predicted_index
-            )
-        ]
-
-        target_layers = [
-            model.features[-1]
-        ]
+        predicted_index = top_indices[0][0].item()
+        targets = [ClassifierOutputTarget(predicted_index)]
+        target_layers = [model.features[-1]]
 
         with GradCAM(model=model, target_layers=target_layers) as cam:
             grayscale_cam = cam(
@@ -321,20 +238,8 @@ def predict_image_bytes(image_bytes):
 
         grayscale_cam = grayscale_cam[0]
 
-        # Prepare original image
-        original_image = image.resize(
-            (224, 224)
-        )
-
-        # Convert to numpy array
-        import numpy as np
-
-        rgb_image = (
-            np.asarray(
-                original_image
-            ).astype("float32")
-            / 255.0
-        )
+        original_image = image.resize((224, 224))
+        rgb_image = np.asarray(original_image).astype("float32") / 255.0
 
         visualization = show_cam_on_image(
             rgb_image,
@@ -342,11 +247,7 @@ def predict_image_bytes(image_bytes):
             use_rgb=True
         )
 
-        # Unique filename
-        filename = (
-            f"{uuid.uuid4().hex}.jpg"
-        )
-
+        filename = f"{uuid.uuid4().hex}.jpg"
         output_path = (
             BASE_DIR.parent
             / "app"
@@ -354,44 +255,27 @@ def predict_image_bytes(image_bytes):
             / filename
         )
 
-        output_path.parent.mkdir(
-            parents=True,
-            exist_ok=True
-        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        Image.fromarray(
-            visualization
-        ).save(
+        Image.fromarray(visualization).save(
             output_path,
             format="JPEG"
         )
 
-        # SAME API FORMAT AS BEFORE
-        heatmap_url = (
-            f"/outputs/{filename}"
-        )
+        heatmap_url = f"/outputs/{filename}"
 
     except Exception as exc:
-
-        print(
-            f"Grad-CAM generation failed: {exc}"
-        )
-
+        print(f"Grad-CAM generation failed: {exc}")
         heatmap_url = None
 
-    # --------------------------------------------------
-    # Explicit Memory Cleanup
-    # --------------------------------------------------
+    # Memory cleanup
     model.zero_grad(set_to_none=True)
-    if 'cam' in locals():
-        del cam
-    del input_tensor, outputs, probabilities
-    import gc
-    gc.collect()
 
-    # --------------------------------------------------
-    # Return EXACT format expected by diagnose.py
-    # --------------------------------------------------
+    if "cam" in locals():
+        del cam
+
+    del input_tensor, outputs, probabilities
+    gc.collect()
 
     return (
         {
@@ -404,89 +288,44 @@ def predict_image_bytes(image_bytes):
 
 
 # --------------------------------------------------
-# 10. File-based prediction
+# 9. File-based prediction
 # --------------------------------------------------
 
 def predict_image(image_path):
-
-    with open(
-        image_path,
-        "rb"
-    ) as f:
-
+    with open(image_path, "rb") as f:
         image_bytes = f.read()
 
-    return predict_image_bytes(
-        image_bytes
-    )
+    return predict_image_bytes(image_bytes)
 
 
 # --------------------------------------------------
-# 11. Local test
+# 10. Local test
 # --------------------------------------------------
 
 if __name__ == "__main__":
-
-    TEST_FOLDER = (
-        BASE_DIR
-        / "data"
-        / "color"
-        / "Apple___healthy"
-    )
-
-    images = list(
-        TEST_FOLDER.glob("*")
-    )
+    TEST_FOLDER = BASE_DIR / "data" / "color" / "Apple___healthy"
+    images = list(TEST_FOLDER.glob("*"))
 
     if images:
-
         IMAGE_PATH = images[0]
+        quality_info, results, heatmap = predict_image(IMAGE_PATH)
 
-        quality_info, results, heatmap = (
-            predict_image(
-                IMAGE_PATH
-            )
-        )
+        print("\n================================")
+        print("TOP 3 PREDICTIONS")
+        print("================================")
+        print("Image:", IMAGE_PATH.name)
 
-        print(
-            "\n================================"
-        )
+        if results:
+            for i, result in enumerate(results, start=1):
+                print(
+                    f"{i}. {result['disease']} -> "
+                    f"{result['confidence']:.2f}%"
+                )
+        else:
+            print("Image quality check failed:", quality_info["issues"])
 
-        print(
-            "TOP 3 PREDICTIONS"
-        )
-
-        print(
-            "================================"
-        )
-
-        print(
-            "Image:",
-            IMAGE_PATH.name
-        )
-
-        for i, result in enumerate(
-            results,
-            start=1
-        ):
-
-            print(
-                f"{i}. "
-                f"{result['disease']} "
-                f"-> "
-                f"{result['confidence']:.2f}%"
-            )
-
-        print(
-            "\nGrad-CAM:"
-        )
-
-        print(
-            heatmap
-        )
+        print("\nGrad-CAM:")
+        print(heatmap)
 
     else:
-
-        print(
-            "No images found."
-        )
+        print("No images found.")
