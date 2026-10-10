@@ -17,7 +17,7 @@ app = FastAPI(title="AgriScan API", version="0.1.0", lifespan=lifespan)
 
 # During local development the React app runs on a different port,
 # so CORS needs to allow it explicitly. Tighten this before deploying.
-```python
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -27,7 +27,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-```
 
 
 @app.get("/health")
