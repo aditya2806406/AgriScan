@@ -112,6 +112,7 @@ def get_nearby_stores(
 
     query = build_overpass_query(lat, lng, radius)
     data = urlencode({"data": query}).encode("utf-8")
+
     result = None
     errors = []
 
@@ -143,15 +144,17 @@ def get_nearby_stores(
             break
 
         except urllib.error.HTTPError as exc:
-            errors.append(f"{url}: HTTP {exc.code}")
+            errors.append(f"{url}: HTTP {exc.code} - {exc.reason!r}")
+
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            errors.append(f"{url}: {type(exc).__name__}")
+            # Log the underlying reason, not just the exception type.
+            errors.append(f"{url}: {exc!r}")
+
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
-            errors.append(f"{url}: Invalid JSON ({type(exc).__name__})")
+            errors.append(f"{url}: Invalid response - {exc!r}")
 
     if result is None:
-        # Keep details in server logs; don't expose upstream errors to clients.
-        print("Overpass request failed: " + "; ".join(errors))
+        print("Overpass request failed: " + "; ".join(errors), flush=True)
         raise HTTPException(
             status_code=503,
             detail="Nearby store data is temporarily unavailable. Please try again.",
@@ -190,12 +193,14 @@ def get_nearby_stores(
         except (TypeError, ValueError):
             continue
 
-        if not (-90 <= store_lat <= 90 and -180 <= store_lon <= 180):
+        if not (
+            -90 <= store_lat <= 90
+            and -180 <= store_lon <= 180
+        ):
             continue
 
         distance = haversine(lat, lng, store_lat, store_lon)
 
-        # Avoid returning elements outside the requested radius.
         if distance > radius:
             continue
 
