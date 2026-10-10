@@ -1,4 +1,6 @@
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
+import asyncio
 from sqlalchemy.orm import Session
 
 import sys
@@ -21,6 +23,8 @@ ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 import os
 
+prediction_semaphore = asyncio.Semaphore(1)
+
 @router.post("/predict", response_model=DiagnosisResponse)
 async def predict(file: UploadFile = File(...), db: Session = Depends(get_db)):
     if file.content_type not in ALLOWED_CONTENT_TYPES:
@@ -41,12 +45,38 @@ async def predict(file: UploadFile = File(...), db: Session = Depends(get_db)):
     upload_path.parent.mkdir(parents=True, exist_ok=True)
     with open(upload_path, "wb") as f:
         f.write(image_bytes)
-    
+
     image_reference = f"/uploads/{safe_filename}"
 
-    quality_info, results, heatmap_url = predict_image_bytes(image_bytes)
-    
+    try:
+        await asyncio.wait_for(prediction_semaphore.acquire(), timeout=0.05)
+    except TimeoutError:
+        raise HTTPException(status_code=503, detail="Server is currently busy processing another image. Please try again in a moment.")
+
+    task = asyncio.create_task(run_in_threadpool(predict_image_bytes, image_bytes))
+    try:
+        quality_info, results, heatmap_url = await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # If client disconnects, thread is still running. Release semaphore only after thread finishes.
+        async def release_later():
+            try:
+                await task
+            except Exception:
+                pass
+            finally:
+                prediction_semaphore.release()
+        asyncio.create_task(release_later())
+        raise
+    except Exception:
+        prediction_semaphore.release()
+        raise
+    else:
+        prediction_semaphore.release()
+
     if not quality_info["acceptable"]:
+        if quality_info.get("is_malformed"):
+            raise HTTPException(status_code=400, detail=quality_info["issues"][0])
+
         # Log failed scan
         scan = Scan(
             disease=None,
@@ -83,10 +113,10 @@ async def predict(file: UploadFile = File(...), db: Session = Depends(get_db)):
 
     # Log the scan to history
     scan = Scan(
-        disease=disease, 
+        disease=disease,
         predicted_crop=crop,
         predicted_disease=condition,
-        confidence=confidence, 
+        confidence=confidence,
         is_low_confidence=is_low_confidence,
         prediction_status=prediction_status,
         image_quality_status="acceptable",
@@ -128,9 +158,9 @@ def download_report(request: ReportRequest, db: Session = Depends(get_db)):
     scan = db.query(Scan).filter(Scan.id == request.scan_id).first()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-        
+
     pdf_buffer = generate_report(scan, request.predictions or [], request.gradcam_url)
-    
+
     # Generate safe filename based on result
     date_str = scan.created_at.strftime("%Y-%m-%d")
     filename = "AgriScan_Report"

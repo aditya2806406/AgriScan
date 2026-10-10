@@ -57,8 +57,9 @@ def _ensure_model():
     print("Loading MobileNetV2 model...")
 
     checkpoint = torch.load(
-        MODEL_PATH,
-        map_location="cpu"
+        str(MODEL_PATH),
+        map_location="cpu",
+        mmap=True
     )
 
     _classes = checkpoint["classes"]
@@ -71,7 +72,8 @@ def _ensure_model():
     )
 
     model.load_state_dict(
-        checkpoint["model_state_dict"]
+        checkpoint["model_state_dict"],
+        assign=True
     )
 
     # Free checkpoint memory after loading.
@@ -107,30 +109,7 @@ def get_classes():
 # 6. Lazy Grad-CAM loader
 # --------------------------------------------------
 
-def _ensure_cam():
-
-    global _cam
-
-    if _cam is not None:
-        return _cam
-
-    model, _ = _ensure_model()
-
-    # Import Grad-CAM only when required.
-    from pytorch_grad_cam import GradCAM
-
-    target_layers = [
-        model.features[-1]
-    ]
-
-    _cam = GradCAM(
-        model=model,
-        target_layers=target_layers
-    )
-
-    print("Grad-CAM ready.")
-
-    return _cam
+# Removed _ensure_cam to use context manager locally
 
 
 # --------------------------------------------------
@@ -205,10 +184,39 @@ def check_image_quality(
 
 def predict_image_bytes(image_bytes):
 
-    # Open image
-    image = Image.open(
-        io.BytesIO(image_bytes)
-    ).convert("RGB")
+    import PIL
+    # Max ~16 million pixels (e.g. 4000x4000) to prevent decompression bombs
+    PIL.Image.MAX_IMAGE_PIXELS = 16_000_000
+
+    # Open image (reads header only initially)
+    try:
+        image = Image.open(io.BytesIO(image_bytes))
+
+        # Enforce reasonable decoding limits (e.g., max 2000x2000)
+        # to prevent memory bombs before fully decompressing to RGB
+        image.thumbnail((2000, 2000), Image.Resampling.LANCZOS)
+
+        image = image.convert("RGB")
+    except PIL.Image.DecompressionBombError:
+        return (
+            {
+                "acceptable": False,
+                "issues": ["Image exceeds maximum pixel limit. Please upload a smaller image."],
+                "is_malformed": True
+            },
+            None,
+            None
+        )
+    except Exception as e:
+        return (
+            {
+                "acceptable": False,
+                "issues": ["Invalid image file or cannot be decoded."],
+                "is_malformed": True
+            },
+            None,
+            None
+        )
 
     # IMPORTANT:
     # Check image quality BEFORE loading model.
@@ -283,12 +291,10 @@ def predict_image_bytes(image_bytes):
 
     try:
 
-        cam = _ensure_cam()
-
+        from pytorch_grad_cam import GradCAM
         from pytorch_grad_cam.utils.model_targets import (
             ClassifierOutputTarget
         )
-
         from pytorch_grad_cam.utils.image import (
             show_cam_on_image
         )
@@ -303,10 +309,15 @@ def predict_image_bytes(image_bytes):
             )
         ]
 
-        grayscale_cam = cam(
-            input_tensor=input_tensor,
-            targets=targets
-        )
+        target_layers = [
+            model.features[-1]
+        ]
+
+        with GradCAM(model=model, target_layers=target_layers) as cam:
+            grayscale_cam = cam(
+                input_tensor=input_tensor,
+                targets=targets
+            )
 
         grayscale_cam = grayscale_cam[0]
 
@@ -367,6 +378,16 @@ def predict_image_bytes(image_bytes):
         )
 
         heatmap_url = None
+
+    # --------------------------------------------------
+    # Explicit Memory Cleanup
+    # --------------------------------------------------
+    model.zero_grad(set_to_none=True)
+    if 'cam' in locals():
+        del cam
+    del input_tensor, outputs, probabilities
+    import gc
+    gc.collect()
 
     # --------------------------------------------------
     # Return EXACT format expected by diagnose.py
